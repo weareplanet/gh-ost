@@ -638,6 +638,12 @@ func (this *Migrator) cutOverTwoStep() (err error) {
 
 // atomicCutOver
 func (this *Migrator) atomicCutOver() (err error) {
+	// TODO - load into memory triggers to be copied
+	err = this.applier.getTriggers(this.migrationContext.OriginalTableName)
+	if err != nil {
+		return this.migrationContext.Log.Errore(err)
+	}
+
 	atomic.StoreInt64(&this.migrationContext.InCutOverCriticalSectionFlag, 1)
 	defer atomic.StoreInt64(&this.migrationContext.InCutOverCriticalSectionFlag, 0)
 
@@ -675,6 +681,7 @@ func (this *Migrator) atomicCutOver() (err error) {
 	renameSessionIdChan := make(chan int64, 2)
 	tablesRenamed := make(chan error, 2)
 	go func() {
+		// TODO triggers a copiar executado depois do rename aqui
 		if err := this.applier.AtomicCutoverRename(renameSessionIdChan, tablesRenamed); err != nil {
 			// Abort! Release the lock
 			atomic.StoreInt64(&tableRenameKnownToHaveFailed, 1)

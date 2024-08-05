@@ -102,6 +102,7 @@ type MigrationContext struct {
 	GoogleCloudPlatform      bool
 	AzureMySQL               bool
 	AttemptInstantDDL        bool
+	Triggers                 []Trigger
 
 	config            ContextConfig
 	configMutex       *sync.Mutex
@@ -236,6 +237,14 @@ type MigrationContext struct {
 	BinlogSyncerMaxReconnectAttempts int
 
 	Log Logger
+}
+
+type Trigger struct {
+	Definer      string
+	Name         string
+	ActionTiming string
+	Manipulation string
+	Statement    string
 }
 
 type Logger interface {

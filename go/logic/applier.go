@@ -8,6 +8,7 @@ package logic
 import (
 	gosql "database/sql"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -749,6 +750,10 @@ func (this *Applier) RenameTablesRollback() (renameError error) {
 	)
 	this.migrationContext.Log.Infof("Renaming back both tables")
 	if _, err := sqlutils.ExecNoPrepare(this.db, query); err == nil {
+		// copy back triggers
+		if err = this.copyTriggersBack(this.migrationContext.GetGhostTableName(), this.migrationContext.OriginalTableName); err != nil {
+			renameError = err
+		}
 		return nil
 	}
 	// But, if for some reason the above was impossible to do, we rename one by one.
@@ -772,6 +777,12 @@ func (this *Applier) RenameTablesRollback() (renameError error) {
 	if _, err := sqlutils.ExecNoPrepare(this.db, query); err != nil {
 		renameError = err
 	}
+
+	// copy back triggers
+	if err := this.copyTriggersBack(this.migrationContext.GetGhostTableName(), this.migrationContext.OriginalTableName); err != nil {
+		renameError = err
+	}
+
 	return this.migrationContext.Log.Errore(renameError)
 }
 
@@ -1105,6 +1116,17 @@ func (this *Applier) AtomicCutoverRename(sessionIdChan chan int64, tablesRenamed
 		tablesRenamed <- err
 		return this.migrationContext.Log.Errore(err)
 	}
+
+	// TODO - triggers podem ser copiados aqui
+	ts := time.Now()
+	err = this.copyTriggers(tx, this.migrationContext.GetOldTableName(), this.migrationContext.OriginalTableName)
+	if err != nil {
+		this.migrationContext.Log.Errore(err)
+		// TODO can't recover from rename now
+	}
+	tt := time.Now().Sub(ts)
+	this.migrationContext.Log.Infof("Triggers copy duration: %s - - - - - - - - - -", tt)
+
 	tablesRenamed <- nil
 	this.migrationContext.Log.Infof("Tables renamed")
 	return nil
@@ -1231,4 +1253,126 @@ func (this *Applier) Teardown() {
 	this.db.Close()
 	this.singletonDB.Close()
 	atomic.StoreInt64(&this.finishedMigrating, 1)
+}
+
+func (this *Applier) getTriggers(source string) error {
+	triggers := make([]base.Trigger, 0, 3)
+
+	cols := sql.NewColumnValues(6)
+
+	//s := time.Now().Format("150405.000")
+	//s = strings.Replace(s, ".", "", 1)
+
+	// selecionar todas os triggers da tabela antiga e copiar para a nova
+	this.migrationContext.Log.Warning("going to run select triggers query - - - - - - - - - - - - - -")
+
+	selectTriggers := fmt.Sprintf(`select /* gh-ost */ definer, trigger_name, action_timing, event_manipulation, action_statement, event_object_table 
+from information_schema.triggers where event_object_table = '%s';`, source)
+	rows, err := this.db.Query(selectTriggers)
+	if err != nil {
+		return this.migrationContext.Log.Errorf("Error getting triggers: %s", err.Error())
+	}
+
+	for rows.Next() {
+		err = rows.Scan(cols.ValuesPointers...)
+		if err != nil {
+			return this.migrationContext.Log.Errorf("Error scanning values: %s: ", err.Error())
+		}
+
+		definer := cols.StringColumn(0)
+		name := cols.StringColumn(1)
+		actionTiming := cols.StringColumn(2)
+		manipulation := cols.StringColumn(3)
+		statement := cols.StringColumn(4)
+
+		if !strings.Contains(definer, "`%`") {
+			definer = strings.Replace(definer, "%", "`%`", 1)
+		}
+
+		this.migrationContext.Log.Warningf("definer: '%s', type: %v", definer, reflect.TypeOf(definer))
+		this.migrationContext.Log.Warningf("name: '%s', type: %v", name, reflect.TypeOf(name))
+		this.migrationContext.Log.Warningf("actionTiming: '%s', type: %v", actionTiming, reflect.TypeOf(actionTiming))
+		this.migrationContext.Log.Warningf("manipulation: '%s', type: %v", manipulation, reflect.TypeOf(manipulation))
+		this.migrationContext.Log.Warningf("statement - , type: %v", reflect.TypeOf(statement))
+
+		triggers = append(triggers, base.Trigger{
+			Definer:      definer,
+			Name:         name, //fmt.Sprintf("%s_%s", name, s),
+			ActionTiming: actionTiming,
+			Manipulation: manipulation,
+			Statement:    statement,
+		})
+	}
+
+	this.migrationContext.Triggers = triggers
+
+	return nil
+}
+
+func (this *Applier) copyTriggers(tx *gosql.Tx, source, dest string) error {
+	this.migrationContext.Log.Infof("going to run CopyTriggers from '%s' to '%s'", source, dest)
+	triggers := this.migrationContext.Triggers
+
+	if len(triggers) == 0 {
+		this.migrationContext.Log.Warning("No triggers received to be copied")
+		return nil
+	}
+
+	for _, t := range triggers {
+
+		this.migrationContext.Log.Warningf("definer: '%s'", t.Definer)
+		this.migrationContext.Log.Warningf("name: '%s'", t.Name)
+		this.migrationContext.Log.Warningf("actionTiming: '%s'", t.ActionTiming)
+		this.migrationContext.Log.Warningf("manipulation: '%s'", t.Manipulation)
+
+		this.migrationContext.Log.Warningf("going to drop trigger `%s`- - - - - - - - - - - - - -", t.Name)
+		deleteTriggerSQL := fmt.Sprintf("DROP TRIGGER `%s`;", t.Name)
+		if _, err := tx.Exec(deleteTriggerSQL); err != nil {
+			return this.migrationContext.Log.Errorf("error deleting original trigger: %s", err.Error())
+		}
+
+		this.migrationContext.Log.Warning("creating trigger - - - - - - - - - - - - - -")
+		this.migrationContext.Log.Warningf("query trigger: %s", fmt.Sprintf("CREATE DEFINER=`%s` TRIGGER `%s` %s %s ON `%s` FOR EACH ROW ...;", t.Definer, t.Name, t.ActionTiming, t.Manipulation, dest))
+		createTriggerSQL := fmt.Sprintf("CREATE DEFINER=%s TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n %s;", t.Definer, t.Name, t.ActionTiming, t.Manipulation, dest, t.Statement)
+		if _, err := tx.Exec(createTriggerSQL); err != nil {
+			return this.migrationContext.Log.Errorf("error creating trigger: %s", err.Error())
+		}
+
+	}
+
+	return nil
+}
+
+func (this *Applier) copyTriggersBack(source, dest string) (err error) {
+	this.migrationContext.Log.Infof("going to run CopyTriggersB from '%s' to '%s'", source, dest)
+	triggers := this.migrationContext.Triggers
+
+	if len(triggers) == 0 {
+		this.migrationContext.Log.Warning("No triggers received to be copied")
+		return nil
+	}
+
+	for _, t := range triggers {
+
+		this.migrationContext.Log.Warningf("definer: '%s'", t.Definer)
+		this.migrationContext.Log.Warningf("name: '%s'", t.Name)
+		this.migrationContext.Log.Warningf("actionTiming: '%s'", t.ActionTiming)
+		this.migrationContext.Log.Warningf("manipulation: '%s'", t.Manipulation)
+
+		this.migrationContext.Log.Warningf("going to drop trigger `%s`- - - - - - - - - - - - - -", t.Name)
+		deleteTriggerSQL := fmt.Sprintf("DROP TRIGGER `%s`;", t.Name)
+		if _, err = sqlutils.ExecNoPrepare(this.db, deleteTriggerSQL); err != nil {
+			err = this.migrationContext.Log.Errorf("error deleting original trigger: %s", err.Error())
+		}
+
+		this.migrationContext.Log.Warning("creating trigger - - - - - - - - - - - - - -")
+		this.migrationContext.Log.Warningf("query trigger: %s", fmt.Sprintf("CREATE DEFINER=`%s` TRIGGER `%s` %s %s ON `%s` FOR EACH ROW ...;", t.Definer, t.Name, t.ActionTiming, t.Manipulation, dest))
+		createTriggerSQL := fmt.Sprintf("CREATE DEFINER=%s TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n %s;", t.Definer, t.Name, t.ActionTiming, t.Manipulation, dest, t.Statement)
+		if _, err = sqlutils.ExecNoPrepare(this.db, createTriggerSQL); err != nil {
+			err = this.migrationContext.Log.Errorf("error creating trigger: %s", err.Error())
+		}
+
+	}
+
+	return err
 }
