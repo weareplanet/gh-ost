@@ -1278,8 +1278,9 @@ func (this *Applier) getTriggers(source string) error {
 		manipulation := cols.StringColumn(3)
 		statement := cols.StringColumn(4)
 
-		if !strings.Contains(definer, "`%`") {
-			definer = strings.Replace(definer, "%", "`%`", 1)
+		definer, err = this.parseDefiner(name, definer)
+		if err != nil {
+			return this.migrationContext.Log.Error(err.Error())
 		}
 
 		triggers = append(triggers, base.Trigger{
@@ -1295,6 +1296,24 @@ func (this *Applier) getTriggers(source string) error {
 	this.migrationContext.Triggers = triggers
 
 	return nil
+}
+
+func (this *Applier) parseDefiner(triggerName, definer string) (string, error) {
+	newDefiner := definer
+	if strings.Contains(definer, "`") {
+		newDefiner = strings.Replace(definer, "`", "", -1)
+	}
+
+	definerParts := strings.Split(newDefiner, "@")
+	if len(definerParts) > 2 {
+		return "", this.migrationContext.Log.Errorf("Unexpected definer for trigger '%s': %s", triggerName, definer)
+	}
+	if len(definerParts) == 1 {
+		definer = fmt.Sprintf("`%s`", definerParts[0])
+	} else {
+		definer = fmt.Sprintf("`%s`@`%s`", definerParts[0], definerParts[1])
+	}
+	return definer, nil
 }
 
 func (this *Applier) copyTriggers(tx *gosql.Tx, source, dest string) error {

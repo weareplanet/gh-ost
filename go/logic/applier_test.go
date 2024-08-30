@@ -183,3 +183,39 @@ func TestApplierInstantDDL(t *testing.T) {
 		test.S(t).ExpectEquals(stmt, "ALTER /* gh-ost */ TABLE `test`.`mytable` ADD INDEX (foo), ALGORITHM=INSTANT")
 	})
 }
+
+func TestApplierParseDefiner(t *testing.T) {
+	migrationContext := base.NewMigrationContext()
+	migrationContext.DatabaseName = "test"
+	migrationContext.OriginalTableName = "mytable"
+	migrationContext.AlterStatementOptions = "ADD INDEX (foo)"
+	a := NewApplier(migrationContext)
+
+	actual, err := a.parseDefiner("teste", "masAdmin")
+	test.S(t).ExpectNil(err)
+	test.S(t).ExpectEquals(actual, "`masAdmin`")
+
+	actual, err = a.parseDefiner("teste", "`masAdmin`")
+	test.S(t).ExpectNil(err)
+	test.S(t).ExpectEquals(actual, "`masAdmin`")
+
+	actual, err = a.parseDefiner("teste", "masAdmin@10.120.143.%")
+	test.S(t).ExpectNil(err)
+	test.S(t).ExpectEquals(actual, "`masAdmin`@`10.120.143.%`")
+
+	actual, err = a.parseDefiner("teste", "`masAdmin`@`10.120.143.%`")
+	test.S(t).ExpectNil(err)
+	test.S(t).ExpectEquals(actual, "`masAdmin`@`10.120.143.%`")
+
+	actual, err = a.parseDefiner("teste", "masAdmin@%")
+	test.S(t).ExpectNil(err)
+	test.S(t).ExpectEquals(actual, "`masAdmin`@`%`")
+
+	actual, err = a.parseDefiner("teste", "`masAdmin`@`%`")
+	test.S(t).ExpectNil(err)
+	test.S(t).ExpectEquals(actual, "`masAdmin`@`%`")
+
+	actual, err = a.parseDefiner("teste", "`@masAdmin`@`%`")
+	test.S(t).ExpectNotNil(err)
+	test.S(t).ExpectEquals(actual, "")
+}
