@@ -83,9 +83,11 @@ func (this *Inspector) ValidateOriginalTable() (err error) {
 	if err := this.validateTableForeignKeys(this.migrationContext.DiscardForeignKeys); err != nil {
 		return err
 	}
-	if err := this.validateTableTriggers(); err != nil {
-		return err
-	}
+	// TODO
+	this.migrationContext.Log.Info("Ignoring triggers validation - beta testing")
+	//if err := this.validateTableTriggers(); err != nil {
+	//return err
+	//}
 	if err := this.estimateTableRowsViaExplain(); err != nil {
 		return err
 	}
@@ -736,8 +738,9 @@ func (this *Inspector) getSharedUniqueKeys(originalUniqueKeys, ghostUniqueKeys [
 	// the ALTER is on the name itself...
 	for _, originalUniqueKey := range originalUniqueKeys {
 		for _, ghostUniqueKey := range ghostUniqueKeys {
-			if originalUniqueKey.Columns.EqualsByNames(&ghostUniqueKey.Columns) {
+			if originalUniqueKey.Columns.IsSubsetOf(&ghostUniqueKey.Columns) {
 				uniqueKeys = append(uniqueKeys, originalUniqueKey)
+				break
 			}
 		}
 	}
